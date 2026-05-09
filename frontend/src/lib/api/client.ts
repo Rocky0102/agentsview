@@ -731,6 +731,21 @@ export function getSessionDirectory(
   return fetchJSON(`/sessions/${sessionId}/directory`);
 }
 
+export interface CopySessionFilesResponse {
+  path: string;
+  sessions: number;
+  copied: number;
+  missing?: string[];
+}
+
+export function copySessionFiles(
+  sessionId: string,
+): Promise<CopySessionFilesResponse> {
+  return fetchJSON(`/sessions/${sessionId}/copy-files`, {
+    method: "POST",
+  });
+}
+
 /* Openers — Conductor-style "Open in" */
 
 export interface Opener {

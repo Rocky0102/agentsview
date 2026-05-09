@@ -1,4 +1,5 @@
 <script lang="ts">
+  import * as api from "../../api/client.js";
   import type { Session } from "../../api/types.js";
   import { sessions } from "../../stores/sessions.svelte.js";
   import { starred } from "../../stores/starred.svelte.js";
@@ -153,6 +154,7 @@
   let renaming = $state(false);
   let renameValue = $state("");
   let renameInput: HTMLInputElement | undefined = $state(undefined);
+  let copying = $state(false);
 
   function portal(node: HTMLElement) {
     document.body.appendChild(node);
@@ -198,6 +200,19 @@
       await sessions.deleteSession(session.id);
     } catch {
       // silently fail
+    }
+  }
+
+  async function handleCopy() {
+    if (copying) return;
+    copying = true;
+    closeContextMenu();
+    try {
+      await api.copySessionFiles(session.id);
+    } catch (err) {
+      console.warn("Failed to copy session files:", err);
+    } finally {
+      copying = false;
     }
   }
 
@@ -377,6 +392,11 @@
     use:portal
     style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
   >
+    {#if hasSubagents}
+      <button class="context-menu-item" onclick={handleCopy} disabled={copying}>
+        Copy
+      </button>
+    {/if}
     <button class="context-menu-item" onclick={startRename}>
       Rename
     </button>
@@ -652,6 +672,11 @@
 
   :global(.context-menu .context-menu-item:hover) {
     background: var(--bg-surface-hover);
+  }
+
+  :global(.context-menu .context-menu-item:disabled) {
+    cursor: default;
+    opacity: 0.5;
   }
 
   :global(.context-menu .context-menu-item.danger) {

@@ -57,6 +57,11 @@ type Server struct {
 	// exceed a short timeout. Zero in production.
 	handlerDelay time.Duration
 
+	// Local session-file copy action settings.
+	sessionCopyRoot string
+	sessionCopyNow  func() time.Time
+	openDirectory   func(string) error
+
 	// updateCheckFn is the function called to check for
 	// updates. Defaults to update.CheckForUpdate; tests
 	// can override it via WithUpdateChecker.
@@ -100,6 +105,9 @@ func New(
 		generateStreamFunc: insight.GenerateStream,
 		spaFS:              dist,
 		spaHandler:         http.FileServerFS(dist),
+		sessionCopyRoot:    defaultSessionCopyRoot,
+		sessionCopyNow:     time.Now,
+		openDirectory:      openDirectoryInFileManager,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -149,6 +157,36 @@ func WithUpdateChecker(f UpdateCheckFunc) Option {
 func WithBasePath(path string) Option {
 	return func(s *Server) {
 		s.basePath = strings.TrimRight(path, "/")
+	}
+}
+
+// WithSessionCopyRoot overrides the root directory used by the
+// local session-file copy action. Intended for tests and custom builds.
+func WithSessionCopyRoot(dir string) Option {
+	return func(s *Server) {
+		if dir != "" {
+			s.sessionCopyRoot = dir
+		}
+	}
+}
+
+// WithSessionCopyNow overrides the timestamp used when creating the
+// yyyyMMdd target folder for copied session files.
+func WithSessionCopyNow(f func() time.Time) Option {
+	return func(s *Server) {
+		if f != nil {
+			s.sessionCopyNow = f
+		}
+	}
+}
+
+// WithOpenDirectoryFunc overrides the OS file-manager launcher used
+// after copying session files. Intended for tests.
+func WithOpenDirectoryFunc(f func(string) error) Option {
+	return func(s *Server) {
+		if f != nil {
+			s.openDirectory = f
+		}
 	}
 }
 
@@ -278,6 +316,7 @@ func (s *Server) routes() {
 
 	// Session management
 	s.mux.Handle("PATCH /api/v1/sessions/{id}/rename", s.withTimeout(s.handleRenameSession))
+	s.mux.Handle("POST /api/v1/sessions/{id}/copy-files", s.withTimeout(s.handleCopySessionFiles))
 	s.mux.Handle("DELETE /api/v1/sessions/{id}", s.withTimeout(s.handleDeleteSession))
 	s.mux.Handle("POST /api/v1/sessions/{id}/restore", s.withTimeout(s.handleRestoreSession))
 	s.mux.Handle("DELETE /api/v1/sessions/{id}/permanent", s.withTimeout(s.handlePermanentDeleteSession))
