@@ -183,7 +183,7 @@ main() {
 
   local out_dir out_bin
   out_dir="$TAURI_DIR/src-tauri/binaries"
-  out_bin="$out_dir/agentsview-$target_triple$ext"
+  out_bin="$out_dir/agentsview-backend-$target_triple$ext"
 
   mkdir -p "$out_dir"
   cp "$build_bin" "$out_bin"

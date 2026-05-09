@@ -31,7 +31,7 @@
     "longDescription": "AgentsView is a local web viewer for AI agent coding sessions.",
     "createUpdaterArtifacts": "v1Compatible",
     "externalBin": [
-      "binaries/agentsview"
+      "binaries/agentsview-backend"
     ],
     "icon": [
       "icons/32x32.png",

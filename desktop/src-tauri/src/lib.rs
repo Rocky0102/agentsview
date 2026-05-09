@@ -121,7 +121,7 @@ fn launch_backend(app: &mut App) -> Result<(), DynError> {
 
 fn spawn_sidecar(app: &App) -> Result<(CommandRx, CommandChild), DynError> {
     let port_arg = PREFERRED_PORT.to_string();
-    let mut command = app.shell().sidecar("agentsview")?;
+    let mut command = app.shell().sidecar("agentsview-backend")?;
     for (key, value) in sidecar_env() {
         command = command.env(key, value);
     }
