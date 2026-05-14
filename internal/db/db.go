@@ -27,7 +27,14 @@ import (
 // trigger a non-destructive re-sync (mtime reset + skip cache
 // clear) so existing session data is preserved.
 //
-// Bumped to 27: Piebald parser now persists normalized per-message
+// Bumped to 28: Codex rollout files can replay parent-thread history
+// inside child-session files. The parser now scopes imported content
+// to the rollout's target thread so child sessions stop overwriting
+// the parent session and parent-only metrics stop ingesting child
+// transcript messages. Existing Codex rows need a full re-parse to
+// rebuild the correct parent/child sessions.
+//
+// (27: Piebald parser now persists normalized per-message
 // token_usage JSON. Existing Piebald rows need re-parsing so Usage
 // reports can include older Piebald sessions.
 //
@@ -81,7 +88,7 @@ import (
 //
 // (17: Codex <skill> template filtering.)
 // (16: <turn_aborted> system messages.)
-const dataVersion = 27
+const dataVersion = 28
 
 const tokenCoverageRepairStatsKey = "token_coverage_repair_v1"
 

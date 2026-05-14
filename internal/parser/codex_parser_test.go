@@ -1158,6 +1158,49 @@ func TestParseCodexSession_EdgeCases(t *testing.T) {
 		assert.Equal(t, 1, len(msgs))
 		assert.Equal(t, "unknown", sess.Project)
 	})
+
+	t.Run("replayed parent transcript is excluded from child rollout", func(t *testing.T) {
+		content := testjsonl.JoinJSONL(
+			`{"timestamp":"2024-01-01T10:00:00Z","type":"session_meta","payload":{"id":"child-1","forked_from_id":"parent-1","cwd":"/tmp/proj","thread_source":"subagent","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-1"}}}}}`,
+			`{"timestamp":"2024-01-01T10:00:00Z","type":"session_meta","payload":{"id":"parent-1","cwd":"/tmp/proj","thread_source":"user","source":"cli"}}`,
+			`{"timestamp":"2024-01-01T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"parent-1-turn-a","started_at":1704102600}}`,
+			testjsonl.CodexMsgJSON("user", "parent prompt", "2024-01-01T10:00:01Z"),
+			testjsonl.CodexMsgJSON("assistant", "parent reply", "2024-01-01T10:00:02Z"),
+			`{"timestamp":"2024-01-01T10:00:03Z","type":"event_msg","payload":{"type":"task_started","turn_id":"child-1-turn-a","started_at":1704103203}}`,
+			`{"timestamp":"2024-01-01T10:00:03Z","type":"turn_context","payload":{"turn_id":"child-1-turn-a","model":"gpt-5.4"}}`,
+			testjsonl.CodexMsgJSON("user", "child prompt", "2024-01-01T10:00:04Z"),
+			testjsonl.CodexMsgJSON("assistant", "child reply", "2024-01-01T10:00:05Z"),
+			`{"timestamp":"2024-01-01T10:00:06Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"child-1-turn-a"}}`,
+		)
+
+		sess, msgs := runCodexParserTest(t, "child-replay.jsonl", content, false)
+		assert.Equal(t, "codex:child-1", sess.ID)
+		require.Len(t, msgs, 2)
+		assert.Equal(t, "child prompt", msgs[0].Content)
+		assert.Equal(t, "child reply", msgs[1].Content)
+		assert.Equal(t, "child prompt", sess.FirstMessage)
+		assert.Equal(t, TerminationAwaitingUser, sess.TerminationStatus)
+	})
+
+	t.Run("foreign child turn is excluded from parent rollout", func(t *testing.T) {
+		content := testjsonl.JoinJSONL(
+			`{"timestamp":"2024-01-01T10:00:00Z","type":"session_meta","payload":{"id":"parent-1","cwd":"/tmp/proj","thread_source":"user","source":"cli"}}`,
+			`{"timestamp":"2024-01-01T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"parent-1-turn-a","started_at":1704103200}}`,
+			testjsonl.CodexMsgJSON("user", "parent prompt", "2024-01-01T10:00:01Z"),
+			`{"timestamp":"2024-01-01T10:00:02Z","type":"session_meta","payload":{"id":"child-1","forked_from_id":"parent-1","cwd":"/tmp/proj","thread_source":"subagent","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-1"}}}}}`,
+			`{"timestamp":"2024-01-01T10:00:03Z","type":"event_msg","payload":{"type":"task_started","turn_id":"child-1-turn-a","started_at":1704103203}}`,
+			testjsonl.CodexMsgJSON("user", "child prompt", "2024-01-01T10:00:04Z"),
+			testjsonl.CodexMsgJSON("assistant", "child reply", "2024-01-01T10:00:05Z"),
+			`{"timestamp":"2024-01-01T10:00:06Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"child-1-turn-a"}}`,
+		)
+
+		sess, msgs := runCodexParserTest(t, "parent-replay.jsonl", content, false)
+		assert.Equal(t, "codex:parent-1", sess.ID)
+		require.Len(t, msgs, 1)
+		assert.Equal(t, "parent prompt", msgs[0].Content)
+		assert.Equal(t, "parent prompt", sess.FirstMessage)
+		assert.Equal(t, TerminationToolCallPending, sess.TerminationStatus)
+	})
 }
 
 // codexEventMsgJSON builds a Codex event_msg line for lifecycle

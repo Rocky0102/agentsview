@@ -54,6 +54,13 @@ type codexSessionBuilder struct {
 	// matching task_complete after) means the agent was working
 	// when the file was last written.
 	lastTaskEvent string
+
+	// Codex subagent rollout files can replay parent-thread history
+	// after the child session_meta. When that happens, only lines
+	// scoped to the target thread should be imported.
+	targetThreadSource     string
+	seenForeignSessionMeta bool
+	activeThreadIsTarget   bool
 }
 
 type codexToolCallRef struct {
@@ -107,10 +114,25 @@ func (b *codexSessionBuilder) processLine(
 	case codexTypeSessionMeta:
 		return b.handleSessionMeta(payload)
 	case codexTypeTurnContext:
+		if !b.shouldProcessScopedLine(
+			codexTypeTurnContext, payload, ts,
+		) {
+			return false
+		}
 		b.currentModel = payload.Get("model").Str
 	case codexTypeResponseItem:
+		if !b.shouldProcessScopedLine(
+			codexTypeResponseItem, payload, ts,
+		) {
+			return false
+		}
 		b.handleResponseItem(payload, ts)
 	case codexTypeEventMsg:
+		if !b.shouldProcessScopedLine(
+			codexTypeEventMsg, payload, ts,
+		) {
+			return false
+		}
 		b.handleEventMsg(payload)
 	}
 	return false
@@ -119,7 +141,19 @@ func (b *codexSessionBuilder) processLine(
 func (b *codexSessionBuilder) handleSessionMeta(
 	payload gjson.Result,
 ) (skip bool) {
-	b.sessionID = payload.Get("id").Str
+	id := payload.Get("id").Str
+	if id == "" {
+		return false
+	}
+	if b.sessionID == "" {
+		b.sessionID = id
+		b.targetThreadSource = payload.Get("thread_source").Str
+		b.activeThreadIsTarget = true
+	} else if id != b.sessionID {
+		b.seenForeignSessionMeta = true
+		b.activeThreadIsTarget = false
+		return false
+	}
 
 	if cwd := payload.Get("cwd").Str; cwd != "" {
 		branch := payload.Get("git.branch").Str
@@ -131,6 +165,40 @@ func (b *codexSessionBuilder) handleSessionMeta(
 	}
 
 	return false
+}
+
+func (b *codexSessionBuilder) shouldProcessScopedLine(
+	lineType string, payload gjson.Result, ts time.Time,
+) bool {
+	if !b.seenForeignSessionMeta {
+		return true
+	}
+	if b.activeThreadIsTarget {
+		return true
+	}
+	if b.targetThreadSource != "subagent" {
+		return false
+	}
+	if lineType != codexTypeEventMsg ||
+		payload.Get("type").Str != "task_started" {
+		return false
+	}
+	startedAt := payload.Get("started_at").Int()
+	if startedAt == 0 || ts.IsZero() {
+		return false
+	}
+	if absInt64(ts.Unix()-startedAt) > 5 {
+		return false
+	}
+	b.activeThreadIsTarget = true
+	return true
+}
+
+func absInt64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func (b *codexSessionBuilder) handleResponseItem(
