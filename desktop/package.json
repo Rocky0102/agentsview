@@ -9,6 +9,7 @@
     "tauri:build": "npm run prepare-sidecar && bash ./scripts/run-tauri.sh build",
     "tauri:build:macos-app": "npm run prepare-sidecar && bash ./scripts/run-tauri.sh build --bundles app",
     "tauri:build:macos-dmg": "npm run prepare-sidecar && bash ./scripts/run-tauri.sh build --bundles dmg",
+    "tauri:build:windows:portable": "npm run prepare-sidecar && bash ./scripts/build-windows-portable.sh",
     "tauri:build:windows": "npm run prepare-sidecar && bash ./scripts/run-tauri.sh build --bundles nsis",
     "tauri:build:linux": "npm run prepare-sidecar && bash ./scripts/run-tauri.sh build --bundles appimage",
     "tauri": "tauri"

@@ -22,12 +22,16 @@ npm install
 npm run tauri:dev
 npm run tauri:build
 npm run tauri:build:macos-app
+npm run tauri:build:windows:portable
 npm run tauri:build:windows
 ```
 
 The `prepare-sidecar` step runs automatically for `tauri:dev` and `tauri:build`.
 It builds `agentsview` and copies it to
 `src-tauri/binaries/agentsview-<target-triple>`.
+
+`npm run tauri:build:windows:portable` also syncs the Windows portable
+artifacts to `dist/desktop/windows/portable/`.
 
 ## Environment Notes (Desktop)
 
