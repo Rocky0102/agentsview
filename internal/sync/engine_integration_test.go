@@ -196,7 +196,8 @@ func (e *testEnv) writeClaudeSessionForProject(
 	t *testing.T, dirPath, filename, content string,
 ) string {
 	t.Helper()
-	projName := strings.ReplaceAll(dirPath, "/", "-")
+	projName := strings.NewReplacer("/", "-", "\\", "-", ":", "-").
+		Replace(dirPath)
 	return e.writeClaudeSession(t, projName, filename, content)
 }
 
@@ -382,6 +383,502 @@ func TestSyncEngineWorktreeProjectWhenPathMissing(t *testing.T) {
 	assertSessionProject(t, env.db, "offline-worktree", "agentsview")
 }
 
+func TestSyncEngineAppliesWorktreeProjectMapping(t *testing.T) {
+	env := setupTestEnv(t)
+
+	if got := env.engine.Machine(); got != "local" {
+		t.Fatalf("engine machine = %q, want local", got)
+	}
+
+	root := t.TempDir()
+	worktreePrefix := filepath.Join(root, "my-app.worktrees")
+	sessionCwd := filepath.Join(worktreePrefix, "feature-login")
+	_, err := env.db.CreateWorktreeProjectMapping(
+		context.Background(),
+		db.WorktreeProjectMapping{
+			Machine:    "local",
+			PathPrefix: worktreePrefix,
+			Project:    "canonical-app",
+			Enabled:    true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("CreateWorktreeProjectMapping: %v", err)
+	}
+
+	content := testjsonl.NewSessionBuilder().
+		AddClaudeUser(tsEarly, "Worktree mapped", sessionCwd).
+		AddClaudeAssistant(tsEarlyS5, "ok").
+		String()
+
+	env.writeClaudeSessionForProject(
+		t, sessionCwd,
+		"mapped-worktree.jsonl", content,
+	)
+
+	runSyncAndAssert(t, env.engine, sync.SyncStats{
+		TotalSessions: 1,
+		Synced:        1,
+		Skipped:       0,
+	})
+
+	assertSessionProject(
+		t, env.db, "mapped-worktree", "canonical_app",
+	)
+}
+
+func TestSyncSingleSessionAppliesWorktreeProjectMapping(t *testing.T) {
+	env := setupTestEnv(t)
+
+	root := t.TempDir()
+	worktreePrefix := filepath.Join(root, "my-app.worktrees")
+	sessionCwd := filepath.Join(worktreePrefix, "feature-login")
+	_, err := env.db.CreateWorktreeProjectMapping(
+		context.Background(),
+		db.WorktreeProjectMapping{
+			Machine:    "local",
+			PathPrefix: worktreePrefix,
+			Project:    "canonical-app",
+			Enabled:    true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("CreateWorktreeProjectMapping: %v", err)
+	}
+
+	content := testjsonl.NewSessionBuilder().
+		AddClaudeUser(tsEarly, "Worktree mapped single", sessionCwd).
+		AddClaudeAssistant(tsEarlyS5, "ok").
+		String()
+
+	env.writeClaudeSessionForProject(
+		t, sessionCwd,
+		"mapped-worktree-single.jsonl", content,
+	)
+
+	if err := env.engine.SyncSingleSession(
+		"mapped-worktree-single",
+	); err != nil {
+		t.Fatalf("SyncSingleSession: %v", err)
+	}
+
+	assertSessionProject(
+		t, env.db, "mapped-worktree-single", "canonical_app",
+	)
+}
+
+func TestSyncSingleSessionSkippedClaudeDoesNotApplyWorktreeProjectMapping(
+	t *testing.T,
+) {
+	env := setupTestEnv(t)
+
+	root := t.TempDir()
+	worktreePrefix := filepath.Join(root, "my-app.worktrees")
+	sessionCwd := filepath.Join(worktreePrefix, "feature-login")
+	content := testjsonl.NewSessionBuilder().
+		AddClaudeUser(tsEarly, "Worktree mapped after initial sync", sessionCwd).
+		AddClaudeAssistant(tsEarlyS5, "ok").
+		String()
+
+	env.writeClaudeSessionForProject(
+		t, sessionCwd,
+		"mapped-worktree-single-skip.jsonl", content,
+	)
+
+	runSyncAndAssert(t, env.engine, sync.SyncStats{
+		TotalSessions: 1,
+		Synced:        1,
+		Skipped:       0,
+	})
+	before, err := env.db.GetSession(
+		context.Background(), "mapped-worktree-single-skip",
+	)
+	if err != nil {
+		t.Fatalf("GetSession before mapping: %v", err)
+	}
+	if before == nil {
+		t.Fatal("session missing before mapping")
+	}
+	if before.Project == "canonical_app" {
+		t.Fatalf("project before mapping = %q, want stale project", before.Project)
+	}
+	if before.LocalModifiedAt != nil {
+		t.Fatalf(
+			"local_modified_at before mapping = %v, want nil",
+			before.LocalModifiedAt,
+		)
+	}
+
+	_, err = env.db.CreateWorktreeProjectMapping(
+		context.Background(),
+		db.WorktreeProjectMapping{
+			Machine:    "local",
+			PathPrefix: worktreePrefix,
+			Project:    "canonical-app",
+			Enabled:    true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("CreateWorktreeProjectMapping: %v", err)
+	}
+
+	if err := env.engine.SyncSingleSession(
+		"mapped-worktree-single-skip",
+	); err != nil {
+		t.Fatalf("SyncSingleSession: %v", err)
+	}
+
+	after, err := env.db.GetSession(
+		context.Background(), "mapped-worktree-single-skip",
+	)
+	if err != nil {
+		t.Fatalf("GetSession after skipped sync: %v", err)
+	}
+	if after == nil {
+		t.Fatal("session missing after skipped sync")
+	}
+	if after.Project != before.Project {
+		t.Fatalf(
+			"project after skipped sync = %q, want %q",
+			after.Project,
+			before.Project,
+		)
+	}
+}
+
+func TestSyncAllSkippedClaudeDoesNotApplyWorktreeProjectMapping(
+	t *testing.T,
+) {
+	env := setupTestEnv(t)
+
+	root := t.TempDir()
+	worktreePrefix := filepath.Join(root, "my-app.worktrees")
+	sessionCwd := filepath.Join(worktreePrefix, "feature-login")
+	content := testjsonl.NewSessionBuilder().
+		AddClaudeUser(tsEarly, "Worktree mapped during normal skip", sessionCwd).
+		AddClaudeAssistant(tsEarlyS5, "ok").
+		String()
+
+	env.writeClaudeSessionForProject(
+		t, sessionCwd,
+		"mapped-worktree-syncall-skip.jsonl", content,
+	)
+
+	runSyncAndAssert(t, env.engine, sync.SyncStats{
+		TotalSessions: 1,
+		Synced:        1,
+		Skipped:       0,
+	})
+	before, err := env.db.GetSession(
+		context.Background(), "mapped-worktree-syncall-skip",
+	)
+	if err != nil {
+		t.Fatalf("GetSession before mapping: %v", err)
+	}
+	if before == nil {
+		t.Fatal("session missing before mapping")
+	}
+	if before.Project == "canonical_app" {
+		t.Fatalf("project before mapping = %q, want stale project", before.Project)
+	}
+	_, err = env.db.CreateWorktreeProjectMapping(
+		context.Background(),
+		db.WorktreeProjectMapping{
+			Machine:    "local",
+			PathPrefix: worktreePrefix,
+			Project:    "canonical-app",
+			Enabled:    true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("CreateWorktreeProjectMapping: %v", err)
+	}
+
+	runSyncAndAssert(t, env.engine, sync.SyncStats{
+		TotalSessions: 1,
+		Synced:        0,
+		Skipped:       1,
+	})
+
+	after, err := env.db.GetSession(
+		context.Background(), "mapped-worktree-syncall-skip",
+	)
+	if err != nil {
+		t.Fatalf("GetSession after skipped sync: %v", err)
+	}
+	if after == nil {
+		t.Fatal("session missing after skipped sync")
+	}
+	if after.Project != before.Project {
+		t.Fatalf(
+			"project after skipped sync = %q, want %q",
+			after.Project,
+			before.Project,
+		)
+	}
+}
+
+func TestSyncPathsSkippedClaudeDoesNotApplyWorktreeProjectMapping(
+	t *testing.T,
+) {
+	env := setupTestEnv(t)
+
+	root := t.TempDir()
+	worktreePrefix := filepath.Join(root, "my-app.worktrees")
+	sessionCwd := filepath.Join(worktreePrefix, "feature-login")
+	content := testjsonl.NewSessionBuilder().
+		AddClaudeUser(tsEarly, "Worktree mapped during path skip", sessionCwd).
+		AddClaudeAssistant(tsEarlyS5, "ok").
+		String()
+
+	path := env.writeClaudeSessionForProject(
+		t, sessionCwd,
+		"mapped-worktree-syncpaths-skip.jsonl", content,
+	)
+
+	runSyncAndAssert(t, env.engine, sync.SyncStats{
+		TotalSessions: 1,
+		Synced:        1,
+		Skipped:       0,
+	})
+	before, err := env.db.GetSession(
+		context.Background(), "mapped-worktree-syncpaths-skip",
+	)
+	if err != nil {
+		t.Fatalf("GetSession before mapping: %v", err)
+	}
+	if before == nil {
+		t.Fatal("session missing before mapping")
+	}
+	if before.Project == "canonical_app" {
+		t.Fatalf("project before mapping = %q, want stale project", before.Project)
+	}
+	beforeFull, err := env.db.GetSessionFull(
+		context.Background(), "mapped-worktree-syncpaths-skip",
+	)
+	if err != nil {
+		t.Fatalf("GetSessionFull before mapping: %v", err)
+	}
+
+	_, err = env.db.CreateWorktreeProjectMapping(
+		context.Background(),
+		db.WorktreeProjectMapping{
+			Machine:    "local",
+			PathPrefix: worktreePrefix,
+			Project:    "canonical-app",
+			Enabled:    true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("CreateWorktreeProjectMapping: %v", err)
+	}
+
+	env.engine.SyncPaths([]string{path})
+
+	after, err := env.db.GetSessionFull(
+		context.Background(),
+		"mapped-worktree-syncpaths-skip",
+	)
+	if err != nil {
+		t.Fatalf("GetSessionFull after skipped path sync: %v", err)
+	}
+	if after.Project != beforeFull.Project {
+		t.Fatalf(
+			"project after skipped path sync = %q, want %q",
+			after.Project,
+			beforeFull.Project,
+		)
+	}
+	if testStringPtrValue(after.LocalModifiedAt) !=
+		testStringPtrValue(beforeFull.LocalModifiedAt) {
+		t.Fatalf(
+			"local_modified_at after skipped path sync = %v, want %v",
+			after.LocalModifiedAt,
+			beforeFull.LocalModifiedAt,
+		)
+	}
+}
+
+func TestSyncSingleSessionIncrementalAppliesWorktreeProjectMapping(
+	t *testing.T,
+) {
+	env := setupTestEnv(t)
+
+	root := t.TempDir()
+	worktreePrefix := filepath.Join(root, "my-app.worktrees")
+	sessionCwd := filepath.Join(worktreePrefix, "feature-login")
+	initial := testjsonl.NewSessionBuilder().
+		AddClaudeUser(tsEarly, "Worktree mapped after append", sessionCwd).
+		String()
+
+	path := env.writeClaudeSessionForProject(
+		t, sessionCwd,
+		"mapped-worktree-single-incremental.jsonl", initial,
+	)
+
+	runSyncAndAssert(t, env.engine, sync.SyncStats{
+		TotalSessions: 1,
+		Synced:        1,
+		Skipped:       0,
+	})
+	before, err := env.db.GetSession(
+		context.Background(), "mapped-worktree-single-incremental",
+	)
+	if err != nil {
+		t.Fatalf("GetSession before mapping: %v", err)
+	}
+	if before == nil {
+		t.Fatal("session missing before mapping")
+	}
+	if before.Project == "canonical_app" {
+		t.Fatalf("project before mapping = %q, want stale project", before.Project)
+	}
+	_, err = env.db.CreateWorktreeProjectMapping(
+		context.Background(),
+		db.WorktreeProjectMapping{
+			Machine:    "local",
+			PathPrefix: worktreePrefix,
+			Project:    "canonical-app",
+			Enabled:    true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("CreateWorktreeProjectMapping: %v", err)
+	}
+
+	appended := initial + testjsonl.NewSessionBuilder().
+		AddClaudeAssistant(tsEarlyS5, "ok").
+		String()
+	if err := os.WriteFile(path, []byte(appended), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if err := env.engine.SyncSingleSession(
+		"mapped-worktree-single-incremental",
+	); err != nil {
+		t.Fatalf("SyncSingleSession: %v", err)
+	}
+
+	assertSessionMessageCount(
+		t, env.db, "mapped-worktree-single-incremental", 2,
+	)
+	assertSessionProject(
+		t, env.db, "mapped-worktree-single-incremental", "canonical_app",
+	)
+}
+
+func TestSyncAllIncrementalAppliesWorktreeProjectMapping(
+	t *testing.T,
+) {
+	env := setupTestEnv(t)
+
+	root := t.TempDir()
+	worktreePrefix := filepath.Join(root, "my-app.worktrees")
+	sessionCwd := filepath.Join(worktreePrefix, "feature-login")
+	initial := testjsonl.NewSessionBuilder().
+		AddClaudeUser(tsEarly, "Worktree mapped during normal append", sessionCwd).
+		String()
+
+	path := env.writeClaudeSessionForProject(
+		t, sessionCwd,
+		"mapped-worktree-syncall-incremental.jsonl", initial,
+	)
+
+	runSyncAndAssert(t, env.engine, sync.SyncStats{
+		TotalSessions: 1,
+		Synced:        1,
+		Skipped:       0,
+	})
+	before, err := env.db.GetSession(
+		context.Background(), "mapped-worktree-syncall-incremental",
+	)
+	if err != nil {
+		t.Fatalf("GetSession before mapping: %v", err)
+	}
+	if before == nil {
+		t.Fatal("session missing before mapping")
+	}
+	if before.Project == "canonical_app" {
+		t.Fatalf("project before mapping = %q, want stale project", before.Project)
+	}
+	_, err = env.db.CreateWorktreeProjectMapping(
+		context.Background(),
+		db.WorktreeProjectMapping{
+			Machine:    "local",
+			PathPrefix: worktreePrefix,
+			Project:    "canonical-app",
+			Enabled:    true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("CreateWorktreeProjectMapping: %v", err)
+	}
+
+	appended := initial + testjsonl.NewSessionBuilder().
+		AddClaudeAssistant(tsEarlyS5, "ok").
+		String()
+	if err := os.WriteFile(path, []byte(appended), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	runSyncAndAssert(t, env.engine, sync.SyncStats{
+		TotalSessions: 1,
+		Synced:        1,
+		Skipped:       0,
+	})
+
+	assertSessionMessageCount(
+		t, env.db, "mapped-worktree-syncall-incremental", 2,
+	)
+	assertSessionProject(
+		t, env.db, "mapped-worktree-syncall-incremental", "canonical_app",
+	)
+}
+
+func TestResyncAllAppliesWorktreeProjectMappingDuringBulkWrites(
+	t *testing.T,
+) {
+	env := setupTestEnv(t)
+
+	root := t.TempDir()
+	worktreePrefix := filepath.Join(root, "my-app.worktrees")
+	sessionCwd := filepath.Join(worktreePrefix, "feature-login")
+	_, err := env.db.CreateWorktreeProjectMapping(
+		context.Background(),
+		db.WorktreeProjectMapping{
+			Machine:    "local",
+			PathPrefix: worktreePrefix,
+			Project:    "canonical-app",
+			Enabled:    true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("CreateWorktreeProjectMapping: %v", err)
+	}
+
+	content := testjsonl.NewSessionBuilder().
+		AddClaudeUser(tsEarly, "Worktree mapped by resync", sessionCwd).
+		AddClaudeAssistant(tsEarlyS5, "ok").
+		String()
+
+	env.writeClaudeSessionForProject(
+		t, sessionCwd,
+		"mapped-worktree-resync.jsonl", content,
+	)
+
+	stats := env.engine.ResyncAll(context.Background(), nil)
+	if stats.Aborted {
+		t.Fatalf("ResyncAll aborted: %+v", stats)
+	}
+	if stats.Synced != 1 {
+		t.Fatalf("ResyncAll synced = %d, want 1: %+v", stats.Synced, stats)
+	}
+
+	assertSessionProject(
+		t, env.db, "mapped-worktree-resync", "canonical_app",
+	)
+}
+
 func TestSyncEngineCodex(t *testing.T) {
 	env := setupTestEnv(t)
 
@@ -498,6 +995,15 @@ func TestSyncEngineProgressEmitsPhaseDoneOnce(t *testing.T) {
 	last := events[len(events)-1]
 	if last.SessionsDone != last.SessionsTotal || last.SessionsTotal != 2 {
 		t.Fatalf("final progress = %d/%d, want 2/2", last.SessionsDone, last.SessionsTotal)
+	}
+	var peakMessages int
+	for _, e := range events {
+		if e.MessagesIndexed > peakMessages {
+			peakMessages = e.MessagesIndexed
+		}
+	}
+	if last.MessagesIndexed < peakMessages {
+		t.Fatalf("final MessagesIndexed = %d regressed from peak %d", last.MessagesIndexed, peakMessages)
 	}
 }
 
@@ -1214,7 +1720,7 @@ func TestSyncPathsGeminiJSONL(t *testing.T) {
 	assertSessionMessageCount(t, env.db, "gemini:"+sessionID, 2)
 }
 
-func TestSyncPathsCodexRejectsFlat(t *testing.T) {
+func TestSyncPathsCodexAcceptsFlatArchived(t *testing.T) {
 	env := setupTestEnv(t)
 
 	uuid := "d4e5f6a7-4567-8901-bcde-f12345678901"
@@ -1226,7 +1732,6 @@ func TestSyncPathsCodexRejectsFlat(t *testing.T) {
 		AddCodexMessage(tsEarlyS1, "user", "Add tests").
 		String()
 
-	// Write directly under codexDir (no year/month/day)
 	path := env.writeSession(
 		t, env.codexDir,
 		"rollout-flat-"+uuid+".jsonl", content,
@@ -1234,14 +1739,112 @@ func TestSyncPathsCodexRejectsFlat(t *testing.T) {
 
 	env.engine.SyncPaths([]string{path})
 
-	sess, _ := env.db.GetSession(
+	sess, err := env.db.GetSession(
 		context.Background(), "codex:"+uuid,
 	)
-	if sess != nil {
-		t.Error(
-			"flat Codex file should be ignored " +
-				"(no year/month/day structure)",
-		)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if sess == nil {
+		t.Fatal("expected flat archived Codex session to sync")
+	}
+	if got := env.db.GetSessionFilePath("codex:" + uuid); got != path {
+		t.Fatalf("file path = %q, want %q", got, path)
+	}
+}
+
+func TestSyncPathsCodexPrefersLivePathOverArchived(t *testing.T) {
+	env := setupTestEnv(t)
+
+	uuid := "e5f6a7b8-5678-9012-cdef-234567890123"
+	content := testjsonl.NewSessionBuilder().
+		AddCodexMeta(
+			tsEarly, uuid,
+			"/home/user/code/api", "user",
+		).
+		AddCodexMessage(tsEarlyS1, "user", "Dedupe me").
+		String()
+
+	livePath := env.writeCodexSession(
+		t,
+		filepath.Join("2026", "05", "04"),
+		"rollout-2026-05-04T02-10-04-"+uuid+".jsonl",
+		content,
+	)
+	archivedPath := env.writeSession(
+		t, env.codexDir,
+		"rollout-2026-05-04T14-31-58-"+uuid+".jsonl",
+		content,
+	)
+
+	env.engine.SyncAll(context.Background(), nil)
+
+	sess, err := env.db.GetSession(
+		context.Background(), "codex:"+uuid,
+	)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if sess == nil {
+		t.Fatal("expected Codex session to sync")
+	}
+	if got := env.db.GetSessionFilePath("codex:" + uuid); got != livePath {
+		t.Fatalf("file path = %q, want %q", got, livePath)
+	}
+	assertSessionMessageCount(t, env.db, "codex:"+uuid, 1)
+	_ = archivedPath
+}
+
+func TestSyncAllSinceCodexKeepsChangedArchivedDuplicate(t *testing.T) {
+	env := setupTestEnv(t)
+
+	uuid := "f6a7b8c9-6789-0123-def0-345678901234"
+	content := testjsonl.NewSessionBuilder().
+		AddCodexMeta(
+			tsEarly, uuid,
+			"/home/user/code/api", "user",
+		).
+		AddCodexMessage(tsEarlyS1, "user", "Sync changed archive").
+		String()
+
+	livePath := env.writeCodexSession(
+		t,
+		filepath.Join("2026", "05", "04"),
+		"rollout-2026-05-04T02-10-04-"+uuid+".jsonl",
+		content,
+	)
+	archivedPath := env.writeSession(
+		t, env.codexDir,
+		"rollout-2026-05-04T14-31-58-"+uuid+".jsonl",
+		content,
+	)
+
+	oldTime := time.Now().Add(-2 * time.Hour)
+	newTime := time.Now().Add(-30 * time.Minute)
+	cutoff := time.Now().Add(-1 * time.Hour)
+	if err := os.Chtimes(livePath, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes live: %v", err)
+	}
+	if err := os.Chtimes(archivedPath, newTime, newTime); err != nil {
+		t.Fatalf("chtimes archived: %v", err)
+	}
+
+	stats := env.engine.SyncAllSince(context.Background(), cutoff, nil)
+	if stats.Synced != 1 {
+		t.Fatalf("SyncAllSince synced = %d, want 1", stats.Synced)
+	}
+
+	sess, err := env.db.GetSession(
+		context.Background(), "codex:"+uuid,
+	)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if sess == nil {
+		t.Fatal("expected archived Codex session to sync")
+	}
+	if got := env.db.GetSessionFilePath("codex:" + uuid); got != archivedPath {
+		t.Fatalf("file path = %q, want %q", got, archivedPath)
 	}
 }
 
@@ -6638,4 +7241,11 @@ func TestIncrementalSync_ClaudeClearOnlyRepairedOnAppend(t *testing.T) {
 			updated.UserMessageCount,
 		)
 	}
+}
+
+func testStringPtrValue(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }

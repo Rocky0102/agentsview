@@ -4668,6 +4668,54 @@ func TestCopySessionMetadataCopiesFromSource(t *testing.T) {
 	}
 }
 
+func TestCopySessionMetadataPreservesWorktreeProjectMappings(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	srcPath := filepath.Join(dir, "src.db")
+	srcPrefix := filepath.Join(dir, "src.worktrees")
+	dstPrefix := filepath.Join(dir, "dst.worktrees")
+	srcDB, err := Open(srcPath)
+	requireNoError(t, err, "Open src")
+	_, err = srcDB.CreateWorktreeProjectMapping(ctx, WorktreeProjectMapping{
+		Machine: "laptop", PathPrefix: srcPrefix, Project: "src-repo", Enabled: true,
+	})
+	requireNoError(t, err, "CreateWorktreeProjectMapping src")
+	_, err = srcDB.CreateWorktreeProjectMapping(ctx, WorktreeProjectMapping{
+		Machine: "laptop", PathPrefix: dstPrefix, Project: "src-conflict", Enabled: true,
+	})
+	requireNoError(t, err, "CreateWorktreeProjectMapping conflict")
+	srcDB.Close()
+
+	dstPath := filepath.Join(dir, "dst.db")
+	dstDB, err := Open(dstPath)
+	requireNoError(t, err, "Open dst")
+	defer dstDB.Close()
+	_, err = dstDB.CreateWorktreeProjectMapping(ctx, WorktreeProjectMapping{
+		Machine: "laptop", PathPrefix: dstPrefix, Project: "dst-repo", Enabled: true,
+	})
+	requireNoError(t, err, "CreateWorktreeProjectMapping dst")
+
+	requireNoError(t, dstDB.CopySessionMetadataFrom(srcPath), "CopySessionMetadataFrom")
+	requireNoError(t, dstDB.CopySessionMetadataFrom(srcPath), "CopySessionMetadataFrom again")
+
+	got, err := dstDB.ListWorktreeProjectMappings(ctx, "laptop")
+	requireNoError(t, err, "ListWorktreeProjectMappings")
+	if len(got) != 2 {
+		t.Fatalf("mapping count = %d, want 2: %+v", len(got), got)
+	}
+	projects := map[string]string{}
+	for _, m := range got {
+		projects[m.PathPrefix] = m.Project
+	}
+	if projects[srcPrefix] != "src_repo" {
+		t.Fatalf("source mapping project = %q, want src_repo", projects[srcPrefix])
+	}
+	if projects[dstPrefix] != "src_conflict" {
+		t.Fatalf("destination mapping project = %q, want src_conflict", projects[dstPrefix])
+	}
+}
+
 func TestCopySessionMetadataPreservesClears(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()

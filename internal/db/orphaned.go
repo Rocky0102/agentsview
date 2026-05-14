@@ -248,7 +248,7 @@ func (d *DB) CopyExcludedSessionsFrom(
 // CopySessionMetadataFrom merges user-managed data from the
 // source DB into sessions that were re-synced into this DB.
 // This preserves display_name, deleted_at, starred_sessions,
-// and pinned_messages across full DB rebuilds.
+// pinned_messages, and worktree_project_mappings across full DB rebuilds.
 func (d *DB) CopySessionMetadataFrom(
 	sourcePath string,
 ) error {
@@ -351,6 +351,37 @@ func (d *DB) CopySessionMetadataFrom(
 				SELECT id FROM main.sessions
 			)`); err != nil {
 			return fmt.Errorf("copying pinned messages: %w", err)
+		}
+	}
+
+	// Copy persistent worktree project mappings. Omit id so
+	// primary-key values from old_db cannot shadow existing
+	// destination rows. ResyncAll may pre-copy mappings into
+	// the temp DB before parsing, so the final metadata copy
+	// reconciles the table to the quiesced source state.
+	if oldDBHasTable(ctx, tx, "worktree_project_mappings") {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM main.worktree_project_mappings
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM old_db.worktree_project_mappings old_m
+				WHERE old_m.machine = main.worktree_project_mappings.machine
+				  AND old_m.path_prefix = main.worktree_project_mappings.path_prefix
+			)`); err != nil {
+			return fmt.Errorf("reconciling worktree project mappings: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO main.worktree_project_mappings
+				(machine, path_prefix, project, enabled, created_at, updated_at)
+			SELECT machine, path_prefix, project, enabled, created_at, updated_at
+			FROM old_db.worktree_project_mappings
+			WHERE true
+			ON CONFLICT(machine, path_prefix) DO UPDATE SET
+				project = excluded.project,
+				enabled = excluded.enabled,
+				created_at = excluded.created_at,
+				updated_at = excluded.updated_at`); err != nil {
+			return fmt.Errorf("copying worktree project mappings: %w", err)
 		}
 	}
 

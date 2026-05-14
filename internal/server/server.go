@@ -308,6 +308,11 @@ func (s *Server) routes() {
 
 	s.mux.Handle("GET /api/v1/settings", s.withTimeout(s.handleGetSettings))
 	s.mux.Handle("PUT /api/v1/settings", s.withTimeout(s.handleUpdateSettings))
+	s.mux.Handle("GET /api/v1/settings/worktree-mappings", s.withTimeout(s.handleListWorktreeMappings))
+	s.mux.Handle("POST /api/v1/settings/worktree-mappings", s.withTimeout(s.handleCreateWorktreeMapping))
+	s.mux.Handle("PUT /api/v1/settings/worktree-mappings/{id}", s.withTimeout(s.handleUpdateWorktreeMapping))
+	s.mux.Handle("DELETE /api/v1/settings/worktree-mappings/{id}", s.withTimeout(s.handleDeleteWorktreeMapping))
+	s.mux.Handle("POST /api/v1/settings/worktree-mappings/apply", s.withTimeout(s.handleApplyWorktreeMappings))
 
 	s.mux.Handle("GET /api/v1/starred", s.withTimeout(s.handleListStarred))
 	s.mux.Handle("PUT /api/v1/sessions/{id}/star", s.withTimeout(s.handleStarSession))

@@ -242,6 +242,14 @@ func (e *Engine) LastSyncStats() SyncStats {
 	return e.lastSyncStats
 }
 
+// Machine returns the machine name this engine writes on sessions.
+func (e *Engine) Machine() string {
+	if e == nil {
+		return ""
+	}
+	return e.machine
+}
+
 type syncJob struct {
 	processResult
 	path string
@@ -310,7 +318,76 @@ func (e *Engine) classifyPaths(
 			files = append(files, df)
 		}
 	}
-	return files
+	return dedupeDiscoveredFiles(files)
+}
+
+func dedupeDiscoveredFiles(
+	files []parser.DiscoveredFile,
+) []parser.DiscoveredFile {
+	if len(files) < 2 {
+		return files
+	}
+
+	bestByKey := make(map[string]parser.DiscoveredFile, len(files))
+	for _, file := range files {
+		key := discoveredFileKey(file)
+		if current, ok := bestByKey[key]; ok {
+			if preferDiscoveredFile(file, current) {
+				bestByKey[key] = file
+			}
+			continue
+		}
+		bestByKey[key] = file
+	}
+
+	out := make([]parser.DiscoveredFile, 0, len(bestByKey))
+	for _, file := range files {
+		key := discoveredFileKey(file)
+		chosen, ok := bestByKey[key]
+		if !ok || chosen.Path != file.Path || chosen.Agent != file.Agent {
+			continue
+		}
+		out = append(out, file)
+		delete(bestByKey, key)
+	}
+	return out
+}
+
+func discoveredFileKey(file parser.DiscoveredFile) string {
+	if file.Agent == parser.AgentCodex {
+		if id := parser.CodexSessionUUIDFromFilename(filepath.Base(file.Path)); id != "" {
+			return string(file.Agent) + "\x00" + id
+		}
+	}
+	return string(file.Agent) + "\x00" + file.Path
+}
+
+func preferDiscoveredFile(
+	candidate, current parser.DiscoveredFile,
+) bool {
+	if candidate.Agent == parser.AgentCodex && current.Agent == parser.AgentCodex {
+		candLayout := codexLayoutForPath(candidate.Path)
+		currLayout := codexLayoutForPath(current.Path)
+		if candLayout != currLayout {
+			return candLayout == parser.CodexLayoutDated
+		}
+	}
+	return false
+}
+
+func codexLayoutForPath(path string) parser.CodexLayout {
+	path = filepath.Clean(path)
+	name := filepath.Base(path)
+	if parser.CodexSessionUUIDFromFilename(name) == "" {
+		return parser.CodexLayoutUnknown
+	}
+	day := filepath.Base(filepath.Dir(path))
+	month := filepath.Base(filepath.Dir(filepath.Dir(path)))
+	year := filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(path))))
+	if parser.IsDigits(day) && parser.IsDigits(month) && parser.IsDigits(year) {
+		return parser.CodexLayoutDated
+	}
+	return parser.CodexLayoutArchivedFlat
 }
 
 // isUnder checks whether path is strictly inside dir after
@@ -409,24 +486,13 @@ func (e *Engine) classifyOnePath(
 		}
 	}
 
-	// Codex: <codexDir>/<year>/<month>/<day>/<file>.jsonl
+	// Codex: either <codexDir>/<year>/<month>/<day>/<file>.jsonl
+	// or <codexDir>/<file>.jsonl for archived sessions.
 	for _, codexDir := range e.agentDirs[parser.AgentCodex] {
 		if codexDir == "" {
 			continue
 		}
-		if rel, ok := isUnder(codexDir, path); ok {
-			parts := strings.Split(rel, sep)
-			if len(parts) != 4 {
-				continue
-			}
-			if !parser.IsDigits(parts[0]) ||
-				!parser.IsDigits(parts[1]) ||
-				!parser.IsDigits(parts[2]) {
-				continue
-			}
-			if !strings.HasSuffix(parts[3], ".jsonl") {
-				continue
-			}
+		if _, _, ok := parser.CodexSessionPathInfo(codexDir, path); ok {
 			return parser.DiscoveredFile{
 				Path:  path,
 				Agent: parser.AgentCodex,
@@ -1039,7 +1105,6 @@ func (e *Engine) ResyncAll(
 		trashedCopied = n
 		log.Printf("resync: pre-sync copied %d trashed sessions", n)
 	}
-
 	// The temp DB is not swapped into production until the end,
 	// so avoid per-row FTS trigger work during the bulk load and
 	// rebuild the index once all message rows are final.
@@ -1224,6 +1289,11 @@ func (e *Engine) ResyncAll(
 	if err := newDB.CopySessionMetadataFrom(origPath); err != nil {
 		log.Printf("resync: copy session metadata: %v", err)
 		// Non-fatal: worst case, renames/soft-deletes are lost.
+	}
+	if _, err := newDB.ApplyWorktreeProjectMappingsFromSync(
+		context.Background(), e.machine,
+	); err != nil {
+		log.Printf("resync: apply worktree mappings: %v", err)
 	}
 
 	// Reclassify is_automated across every row. Orphan-copied
@@ -1430,6 +1500,8 @@ func (e *Engine) syncAllLocked(
 		all = filterFilesByMtime(all, since)
 	}
 
+	all = dedupeDiscoveredFiles(all)
+
 	verbose := onProgress == nil
 
 	if verbose {
@@ -1498,6 +1570,7 @@ func (e *Engine) syncAllLocked(
 		for _, pw := range pending {
 			dbProgress.MessagesIndexed += len(pw.msgs)
 		}
+		stats.messagesIndexed = dbProgress.MessagesIndexed
 		onProgress(dbProgress)
 	}
 
@@ -1519,11 +1592,14 @@ func (e *Engine) syncAllLocked(
 				stats.RecordFailed()
 			}
 		} else {
+			resolveWorktreeProject := e.loadWorktreeProjectResolver()
 			for _, pw := range ocPending {
 				if ctx.Err() != nil {
 					break
 				}
-				switch err := e.writeSessionFull(pw); {
+				switch err := e.writeSessionFullWithResolver(
+					pw, resolveWorktreeProject,
+				); {
 				case err == nil:
 					ocWritten++
 				case isIntentionalSessionSkip(err),
@@ -1572,11 +1648,14 @@ func (e *Engine) syncAllLocked(
 				stats.RecordFailed()
 			}
 		} else {
+			resolveWorktreeProject := e.loadWorktreeProjectResolver()
 			for _, pw := range warpPending {
 				if ctx.Err() != nil {
 					break
 				}
-				switch err := e.writeSessionFull(pw); {
+				switch err := e.writeSessionFullWithResolver(
+					pw, resolveWorktreeProject,
+				); {
 				case err == nil:
 					warpWritten++
 				case isIntentionalSessionSkip(err),
@@ -1625,11 +1704,14 @@ func (e *Engine) syncAllLocked(
 				stats.RecordFailed()
 			}
 		} else {
+			resolveWorktreeProject := e.loadWorktreeProjectResolver()
 			for _, pw := range forgePending {
 				if ctx.Err() != nil {
 					break
 				}
-				switch err := e.writeSessionFull(pw); {
+				switch err := e.writeSessionFullWithResolver(
+					pw, resolveWorktreeProject,
+				); {
 				case err == nil:
 					forgeWritten++
 				case errors.Is(err, db.ErrSessionExcluded),
@@ -3568,6 +3650,45 @@ type pendingWrite struct {
 	forceReplace bool
 }
 
+type worktreeProjectResolver func(
+	machine, cwd, currentProject string,
+) (string, bool)
+
+func (e *Engine) loadWorktreeProjectResolver() worktreeProjectResolver {
+	cache := map[string][]db.WorktreeProjectMapping{}
+	failed := map[string]bool{}
+	return func(machine, cwd, currentProject string) (string, bool) {
+		if machine == "" {
+			return currentProject, false
+		}
+		mappings, ok := cache[machine]
+		if !ok {
+			if failed[machine] {
+				return currentProject, false
+			}
+			var err error
+			mappings, err = e.db.ListActiveWorktreeProjectMappings(
+				context.Background(), machine,
+			)
+			if err != nil {
+				log.Printf(
+					"load worktree project mappings for machine %s: %v",
+					machine, err,
+				)
+				failed[machine] = true
+				return currentProject, false
+			}
+			cache[machine] = mappings
+		}
+		if len(mappings) == 0 {
+			return currentProject, false
+		}
+		return db.ResolveWorktreeProjectFromSortedMappings(
+			mappings, cwd, currentProject,
+		)
+	}
+}
+
 func (e *Engine) writeBatch(
 	batch []pendingWrite,
 	writeMode syncWriteMode,
@@ -3577,8 +3698,11 @@ func (e *Engine) writeBatch(
 		return e.writeBatchBulk(batch, forceReplace)
 	}
 
+	resolveWorktreeProject := e.loadWorktreeProjectResolver()
 	for _, pw := range batch {
-		s, msgs, ok := e.prepareSessionWrite(pw)
+		s, msgs, ok := e.prepareSessionWrite(
+			pw, resolveWorktreeProject,
+		)
 		if !ok {
 			continue
 		}
@@ -3664,12 +3788,20 @@ func (e *Engine) writeBatch(
 
 func (e *Engine) prepareSessionWrite(
 	pw pendingWrite,
+	resolveWorktreeProject worktreeProjectResolver,
 ) (db.Session, []db.Message, bool) {
 	msgs := toDBMessages(pw, e.blockedResultCategories)
 	s := toDBSession(pw)
 	s.MessageCount, s.UserMessageCount =
 		postFilterCounts(msgs)
 	e.applyRemoteRewrites(&s, msgs)
+	if s.Cwd != "" && resolveWorktreeProject != nil {
+		if mapped, ok := resolveWorktreeProject(
+			s.Machine, s.Cwd, s.Project,
+		); ok {
+			s.Project = mapped
+		}
+	}
 	s.IsAutomated = isAutomatedFromSession(s)
 
 	if e.shouldPreserveOpenCodeArchive(
@@ -3691,9 +3823,12 @@ func (e *Engine) writeBatchBulk(
 ) (writtenSessions, writtenMessages, failedSessions int) {
 	writes := make([]db.SessionBatchWrite, 0, len(batch))
 	sources := make(map[string]batchSourceFile, len(batch))
+	resolveWorktreeProject := e.loadWorktreeProjectResolver()
 
 	for _, pw := range batch {
-		s, msgs, ok := e.prepareSessionWrite(pw)
+		s, msgs, ok := e.prepareSessionWrite(
+			pw, resolveWorktreeProject,
+		)
 		if !ok {
 			continue
 		}
@@ -3787,6 +3922,12 @@ func (e *Engine) writeIncremental(
 		)
 	}
 
+	if err := e.applyWorktreeMappingToSingleSession(
+		inc.sessionID,
+	); err != nil {
+		return err
+	}
+
 	// Errors here are already logged by recomputeSignalsFromDB
 	// and are non-fatal for incremental sync; the next
 	// incremental write will retry.
@@ -3849,16 +3990,18 @@ func (e *Engine) writeMessages(
 // sentinel for intentional skips, or another error for real
 // failures.
 func (e *Engine) writeSessionFull(pw pendingWrite) error {
-	msgs := toDBMessages(pw, e.blockedResultCategories)
-	s := toDBSession(pw)
-	s.MessageCount, s.UserMessageCount =
-		postFilterCounts(msgs)
-	e.applyRemoteRewrites(&s, msgs)
-	s.IsAutomated = isAutomatedFromSession(s)
-	if e.shouldPreserveOpenCodeArchive(
-		pw.sess.Agent, pw.sess.File.Path, s.ID,
-		pw.sess.File.Mtime, derefString(s.FileHash), msgs,
-	) {
+	resolveWorktreeProject := e.loadWorktreeProjectResolver()
+	return e.writeSessionFullWithResolver(pw, resolveWorktreeProject)
+}
+
+func (e *Engine) writeSessionFullWithResolver(
+	pw pendingWrite,
+	resolveWorktreeProject worktreeProjectResolver,
+) error {
+	s, msgs, ok := e.prepareSessionWrite(
+		pw, resolveWorktreeProject,
+	)
+	if !ok {
 		return errSessionPreserved
 	}
 	if err := e.db.UpsertSession(s); err != nil {
@@ -4253,7 +4396,8 @@ func (e *Engine) FindSourceFile(sessionID string) string {
 				if dbPath == "" {
 					continue
 				}
-				if _, _, err := parser.ParsePiebaldSession(dbPath, chatID, e.machine); err == nil {
+				results, err := parser.ParsePiebaldSessionResults(dbPath, chatID, e.machine)
+				if err == nil && piebaldResultsContain(results, sessionID) {
 					return dbPath
 				}
 			}
@@ -4341,10 +4485,24 @@ func (e *Engine) SourceMtime(sessionID string) int64 {
 				if err != nil {
 					continue
 				}
+				var mtime int64
 				for _, meta := range metas {
 					if meta.SessionID == chatID {
-						return meta.FileMtime
+						mtime = meta.FileMtime
+						break
 					}
+				}
+				if mtime == 0 {
+					continue
+				}
+				// Base chat IDs are confirmed by meta. Fork IDs
+				// need a parse to verify the requested fork exists.
+				if chatID == rawSessionID {
+					return mtime
+				}
+				results, err := parser.ParsePiebaldSessionResults(dbPath, chatID, e.machine)
+				if err == nil && piebaldResultsContain(results, sessionID) {
+					return mtime
 				}
 			}
 		}
@@ -4502,7 +4660,10 @@ func (e *Engine) SyncSingleSession(sessionID string) (err error) {
 	// Handle incremental updates from processFile (e.g.
 	// append-only JSONL that was already synced).
 	if res.incremental != nil {
-		return e.writeIncremental(res.incremental)
+		if err := e.writeIncremental(res.incremental); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	if len(res.results) == 0 {
@@ -4529,6 +4690,31 @@ func (e *Engine) SyncSingleSession(sessionID string) (err error) {
 		log.Printf("link subagent sessions: %v", err)
 	}
 
+	return nil
+}
+
+func (e *Engine) applyWorktreeMappingToSingleSession(
+	sessionID string,
+) error {
+	ctx := context.Background()
+	sess, err := e.db.GetSession(ctx, sessionID)
+	if err != nil || sess == nil || sess.Cwd == "" {
+		return err
+	}
+
+	machine := sess.Machine
+	if machine == "" {
+		machine = e.machine
+	}
+	_, err = e.db.ApplyWorktreeProjectMappingToSessionFromSync(
+		ctx, machine, sess.ID, sess.Cwd, sess.Project,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"apply worktree mapping to session %s: %w",
+			sessionID, err,
+		)
+	}
 	return nil
 }
 
@@ -4982,7 +5168,7 @@ func (e *Engine) syncSinglePiebald(
 			lastErr = err
 			continue
 		}
-		if len(results) == 0 {
+		if !piebaldResultsContain(results, sessionID) {
 			continue
 		}
 		for _, result := range results {
@@ -5005,6 +5191,18 @@ func (e *Engine) syncSinglePiebald(
 		return fmt.Errorf("piebald session %s: %w", sessionID, lastErr)
 	}
 	return fmt.Errorf("piebald session %s not found", sessionID)
+}
+
+// piebaldResultsContain reports whether any parsed result has the given
+// session ID. Used to verify a requested fork session was actually
+// produced by the parser before treating a base-chat lookup as a hit.
+func piebaldResultsContain(results []parser.ParseResult, sessionID string) bool {
+	for _, r := range results {
+		if r.Session.ID == sessionID {
+			return true
+		}
+	}
+	return false
 }
 
 func strPtr(s string) *string {

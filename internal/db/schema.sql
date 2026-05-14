@@ -273,6 +273,23 @@ CREATE TABLE IF NOT EXISTS remote_skipped_files (
     PRIMARY KEY (host, path)
 );
 
+CREATE TABLE IF NOT EXISTS worktree_project_mappings (
+    id          INTEGER PRIMARY KEY,
+    machine     TEXT NOT NULL,
+    path_prefix TEXT NOT NULL,
+    project     TEXT NOT NULL,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE(machine, path_prefix)
+);
+
+CREATE INDEX IF NOT EXISTS idx_worktree_project_mappings_match
+    ON worktree_project_mappings(machine, enabled, path_prefix);
+
+CREATE INDEX IF NOT EXISTS idx_worktree_project_mappings_project
+    ON worktree_project_mappings(machine, project);
+
 -- PG sync state: stores watermarks for push sync
 CREATE TABLE IF NOT EXISTS pg_sync_state (
     key   TEXT PRIMARY KEY,

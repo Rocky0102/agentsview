@@ -8,6 +8,7 @@
   import TerminalSettings from "./TerminalSettings.svelte";
   import GithubSettings from "./GithubSettings.svelte";
   import RemoteSettings from "./RemoteSettings.svelte";
+  import WorktreeMappingSettings from "./WorktreeMappingSettings.svelte";
 
   let authTokenInput: string = $state("");
 
@@ -87,6 +88,7 @@
       <AppearanceSettings />
       <AgentDirSettings />
       <TerminalSettings />
+      <WorktreeMappingSettings />
       <GithubSettings />
       <RemoteSettings />
 

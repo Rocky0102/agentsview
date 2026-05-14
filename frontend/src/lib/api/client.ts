@@ -828,6 +828,75 @@ export function updateSettings(
   });
 }
 
+export interface WorktreeProjectMapping {
+  id: number;
+  machine: string;
+  path_prefix: string;
+  project: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorktreeMappingsResponse {
+  machine: string;
+  mappings: WorktreeProjectMapping[];
+}
+
+export interface WorktreeMappingInput {
+  path_prefix: string;
+  project: string;
+  enabled: boolean;
+}
+
+export interface ApplyWorktreeMappingsResponse {
+  machine: string;
+  matched_sessions: number;
+  updated_sessions: number;
+}
+
+export function getWorktreeMappings(): Promise<WorktreeMappingsResponse> {
+  return fetchJSON("/settings/worktree-mappings");
+}
+
+export function createWorktreeMapping(
+  input: WorktreeMappingInput,
+): Promise<WorktreeProjectMapping> {
+  return fetchJSON("/settings/worktree-mappings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateWorktreeMapping(
+  id: number,
+  input: WorktreeMappingInput,
+): Promise<WorktreeProjectMapping> {
+  return fetchJSON(`/settings/worktree-mappings/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteWorktreeMapping(id: number): Promise<void> {
+  const res = await fetch(
+    `${getBase()}/settings/worktree-mappings/${id}`,
+    authHeaders({ method: "DELETE" }),
+  );
+  if (!res.ok) {
+    const body = await res.text();
+    throw new ApiError(res.status, apiErrorMessage(res.status, body));
+  }
+}
+
+export function applyWorktreeMappings(): Promise<ApplyWorktreeMappingsResponse> {
+  return fetchJSON("/settings/worktree-mappings/apply", {
+    method: "POST",
+  });
+}
+
 /* Analytics */
 
 export interface AnalyticsParams {
