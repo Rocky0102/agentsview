@@ -88,5 +88,7 @@ describe("SessionList filter dropdown", () => {
       "max-height: min(560px, calc(100vh - 128px));",
     );
     expect(sessionFilterControlSource).toContain("overflow-y: auto;");
+    expect(sessionFilterControlSource).toContain("Time Range");
+    expect(sessionFilterControlSource).toContain("sessions.setTimeRangeFilter");
   });
 });

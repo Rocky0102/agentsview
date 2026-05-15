@@ -1,4 +1,5 @@
 import {
+  afterEach,
   describe,
   it,
   expect,
@@ -80,10 +81,16 @@ describe("SessionsStore", () => {
   let sessions: ReturnType<typeof createSessionsStore>;
 
   beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2025-05-15T12:00:00Z"));
     vi.clearAllMocks();
     storageData.clear();
     mockListSessions();
     sessions = createSessionsStore();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe("initFromParams", () => {
@@ -128,6 +135,7 @@ describe("SessionsStore", () => {
       sessions.initFromParams({});
       expect(sessions.filters.project).toBe("");
       expect(sessions.filters.date).toBe("");
+      expect(sessions.filters.timeRange).toBe("7d");
       expect(sessions.filters.minMessages).toBe(0);
       expect(sessions.filters.maxMessages).toBe(0);
     });
@@ -187,6 +195,7 @@ describe("SessionsStore", () => {
       expect(f.project).toBe("myproj");
       expect(f.machine).toBe("host-a");
       expect(f.agent).toBe("claude");
+      expect(f.timeRange).toBe("custom");
       expect(f.date).toBe("2024-06-15");
       expect(f.dateFrom).toBe("2024-06-01");
       expect(f.dateTo).toBe("2024-06-30");
@@ -203,9 +212,17 @@ describe("SessionsStore", () => {
       const f = parseFiltersFromParams({});
       expect(f.project).toBe("");
       expect(f.agent).toBe("");
+      expect(f.timeRange).toBe("7d");
       expect(f.minMessages).toBe(0);
       expect(f.includeOneShot).toBe(true);
       expect(f.includeAutomated).toBe(false);
+    });
+
+    it("should parse time_range presets", () => {
+      const f = parseFiltersFromParams({ time_range: "30d" });
+      expect(f.timeRange).toBe("30d");
+      expect(f.dateFrom).toBe("");
+      expect(f.dateTo).toBe("");
     });
 
     it("should clear project=unknown when exclude_project=unknown", () => {
@@ -242,6 +259,7 @@ describe("SessionsStore", () => {
         machine: "host-a",
         agent: "claude",
         termination: "unclean",
+        timeRange: "custom",
         date: "2024-06-15",
         dateFrom: "2024-06-01",
         dateTo: "2024-06-30",
@@ -271,6 +289,12 @@ describe("SessionsStore", () => {
       });
     });
 
+    it("should serialize non-default time range presets", () => {
+      const defaults = parseFiltersFromParams({});
+      const params = filtersToParams({ ...defaults, timeRange: "30d" });
+      expect(params).toEqual({ time_range: "30d" });
+    });
+
     it("should serialize termination filter into the URL", () => {
       const defaults = parseFiltersFromParams({});
       const params = filtersToParams({ ...defaults, termination: "unclean" });
@@ -288,6 +312,7 @@ describe("SessionsStore", () => {
         machine: "host-a",
         agent: "claude",
         termination: "unclean",
+        timeRange: "custom",
         date: "2024-06-15",
         dateFrom: "2024-06-01",
         dateTo: "2024-06-30",
@@ -314,6 +339,15 @@ describe("SessionsStore", () => {
   });
 
   describe("load serialization", () => {
+    it("should default to the recent 7 day window", async () => {
+      await sessions.load();
+
+      expectListSessionsCalledWith({
+        date_from: "2025-05-09",
+        date_to: "2025-05-15",
+      });
+    });
+
     it("should omit min/max_messages when 0", async () => {
       sessions.filters.minMessages = 0;
       sessions.filters.maxMessages = 0;
@@ -395,6 +429,7 @@ describe("SessionsStore", () => {
     });
 
     it("should omit date_from when empty", async () => {
+      sessions.filters.timeRange = "all";
       sessions.filters.dateFrom = "";
       await sessions.load();
 
@@ -413,6 +448,7 @@ describe("SessionsStore", () => {
     });
 
     it("should omit date_to when empty", async () => {
+      sessions.filters.timeRange = "all";
       sessions.filters.dateTo = "";
       await sessions.load();
 
@@ -588,6 +624,7 @@ describe("SessionsStore", () => {
 
     it("should omit date_from when empty in loadMore", async () => {
       sessions.nextCursor = "cur3";
+      sessions.filters.timeRange = "all";
       sessions.filters.dateFrom = "";
 
       mockListSessions();
@@ -600,6 +637,7 @@ describe("SessionsStore", () => {
 
     it("should omit date_to when empty in loadMore", async () => {
       sessions.nextCursor = "cur3";
+      sessions.filters.timeRange = "all";
       sessions.filters.dateTo = "";
 
       mockListSessions();
@@ -649,6 +687,7 @@ describe("SessionsStore", () => {
 
       expect(sessions.filters.project).toBe("myproj");
       expect(sessions.filters.agent).toBe("codex");
+      expect(sessions.filters.timeRange).toBe("7d");
       expect(sessions.filters.date).toBe("");
       expect(sessions.filters.dateFrom).toBe("");
       expect(sessions.filters.dateTo).toBe("");
@@ -660,8 +699,8 @@ describe("SessionsStore", () => {
         project: "myproj",
         agent: "codex",
         date: undefined,
-        date_from: undefined,
-        date_to: undefined,
+        date_from: "2025-05-09",
+        date_to: "2025-05-15",
         min_messages: undefined,
         max_messages: undefined,
       });
@@ -794,6 +833,11 @@ describe("SessionsStore", () => {
 
     it("should be true when minUserMessages filter is set", () => {
       sessions.filters.minUserMessages = 3;
+      expect(sessions.hasActiveFilters).toBe(true);
+    });
+
+    it("should be true when a non-default time range is set", () => {
+      sessions.filters.timeRange = "all";
       expect(sessions.hasActiveFilters).toBe(true);
     });
 

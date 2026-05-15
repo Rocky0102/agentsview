@@ -2,6 +2,7 @@
   import type { Snippet } from "svelte";
   import { sessions } from "../../stores/sessions.svelte.js";
   import { starred } from "../../stores/starred.svelte.js";
+  import { SESSION_TIME_RANGE_OPTIONS } from "../../stores/sessions.svelte.js";
   import {
     agentColor,
     agentLabel,
@@ -199,6 +200,20 @@
         </button>
       </div>
     {/if}
+    <div class="filter-section">
+      <div class="filter-section-label">Time Range</div>
+      <div class="pill-buttons">
+        {#each SESSION_TIME_RANGE_OPTIONS as option (option.value)}
+          <button
+            class="pill-btn"
+            class:active={sessions.filters.timeRange === option.value}
+            onclick={() => sessions.setTimeRangeFilter(option.value)}
+          >
+            {option.label}
+          </button>
+        {/each}
+      </div>
+    </div>
     <div class="filter-section">
       <div class="filter-section-label">Activity</div>
       <button

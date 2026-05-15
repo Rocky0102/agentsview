@@ -1,5 +1,9 @@
 import * as api from "../api/client.js";
 import type { Session, ProjectInfo, AgentInfo } from "../api/types.js";
+import {
+  daysAgo,
+  todayStr,
+} from "../components/shared/dateRangeSelector.js";
 import { sync } from "./sync.svelte.js";
 import { events } from "./events.svelte.js";
 
@@ -24,6 +28,7 @@ export interface Filters {
   machine: string;
   agent: string;
   termination: string;
+  timeRange: SessionTimeRange;
   date: string;
   dateFrom: string;
   dateTo: string;
@@ -36,12 +41,85 @@ export interface Filters {
   includeAutomated: boolean;
 }
 
+export type SessionTimeRange =
+  | "7d"
+  | "30d"
+  | "90d"
+  | "180d"
+  | "all"
+  | "custom";
+
+export const DEFAULT_SESSION_TIME_RANGE: SessionTimeRange = "7d";
+
+export const SESSION_TIME_RANGE_OPTIONS: Array<{
+  value: Exclude<SessionTimeRange, "custom">;
+  label: string;
+}> = [
+  { value: "7d", label: "7d" },
+  { value: "30d", label: "1m" },
+  { value: "90d", label: "3m" },
+  { value: "180d", label: "6m" },
+  { value: "all", label: "All" },
+];
+
+const SESSION_TIME_RANGE_DAYS: Record<
+  Exclude<SessionTimeRange, "all" | "custom">,
+  number
+> = {
+  "7d": 6,
+  "30d": 29,
+  "90d": 89,
+  "180d": 179,
+};
+
+function isSessionTimeRange(value: string): value is SessionTimeRange {
+  return [
+    "7d",
+    "30d",
+    "90d",
+    "180d",
+    "all",
+    "custom",
+  ].includes(value);
+}
+
+function hasExplicitDateFilters(
+  f: Pick<Filters, "date" | "dateFrom" | "dateTo">,
+): boolean {
+  return !!(f.date || f.dateFrom || f.dateTo);
+}
+
+function resolveTimeRange(
+  f: Pick<Filters, "timeRange" | "date" | "dateFrom" | "dateTo">,
+): {
+  date?: string;
+  dateFrom?: string;
+  dateTo?: string;
+} {
+  if (hasExplicitDateFilters(f)) {
+    return {
+      date: f.date || undefined,
+      dateFrom: f.dateFrom || undefined,
+      dateTo: f.dateTo || undefined,
+    };
+  }
+  if (f.timeRange === "all" || f.timeRange === "custom") {
+    return {};
+  }
+  const days = SESSION_TIME_RANGE_DAYS[f.timeRange];
+  return {
+    dateFrom: daysAgo(days),
+    dateTo: todayStr(),
+  };
+}
+
 function defaultFilters(): Filters {
   return {
     project: "",
     machine: "",
     agent: "",
     termination: "",
+    timeRange: DEFAULT_SESSION_TIME_RANGE,
     date: "",
     dateFrom: "",
     dateTo: "",
@@ -62,7 +140,14 @@ function loadSavedFilters(): Filters {
     const raw = localStorage.getItem(SESSION_FILTERS_KEY);
     if (raw) {
       const saved = JSON.parse(raw) as Partial<Filters>;
-      return { ...defaultFilters(), ...saved };
+      const next = { ...defaultFilters(), ...saved };
+      const savedTimeRange = saved.timeRange;
+      if (savedTimeRange && isSessionTimeRange(savedTimeRange)) {
+        next.timeRange = savedTimeRange;
+      } else if (hasExplicitDateFilters(next)) {
+        next.timeRange = "custom";
+      }
+      return next;
     }
   } catch {
     // Corrupted localStorage — fall back to defaults.
@@ -88,9 +173,13 @@ export function filtersToParams(
   if (f.machine) p["machine"] = f.machine;
   if (f.agent) p["agent"] = f.agent;
   if (f.termination) p["termination"] = f.termination;
-  if (f.date) p["date"] = f.date;
-  if (f.dateFrom) p["date_from"] = f.dateFrom;
-  if (f.dateTo) p["date_to"] = f.dateTo;
+  if (hasExplicitDateFilters(f)) {
+    if (f.date) p["date"] = f.date;
+    if (f.dateFrom) p["date_from"] = f.dateFrom;
+    if (f.dateTo) p["date_to"] = f.dateTo;
+  } else if (f.timeRange !== DEFAULT_SESSION_TIME_RANGE) {
+    p["time_range"] = f.timeRange;
+  }
   if (f.recentlyActive) p["active_since"] = "true";
   if (f.hideUnknownProject) p["exclude_project"] = "unknown";
   if (f.minMessages > 0) p["min_messages"] = String(f.minMessages);
@@ -137,6 +226,15 @@ export function parseFiltersFromParams(
   const minMsgs = parseInt(params["min_messages"] ?? "", 10);
   const maxMsgs = parseInt(params["max_messages"] ?? "", 10);
   const minUserMsgs = parseInt(params["min_user_messages"] ?? "", 10);
+  const explicitDate =
+    !!params["date"] || !!params["date_from"] || !!params["date_to"];
+  const rawTimeRange = params["time_range"] ?? "";
+  const timeRange =
+    explicitDate
+      ? "custom"
+      : isSessionTimeRange(rawTimeRange)
+        ? rawTimeRange
+        : DEFAULT_SESSION_TIME_RANGE;
 
   const { hideUnknownProject: hideUnknown } =
     splitExcludeProjectParam(params["exclude_project"]);
@@ -154,6 +252,7 @@ export function parseFiltersFromParams(
     machine: params["machine"] ?? "",
     agent: params["agent"] ?? "",
     termination: params["termination"] ?? "",
+    timeRange,
     date: params["date"] ?? "",
     dateFrom: params["date_from"] ?? "",
     dateTo: params["date_to"] ?? "",
@@ -219,6 +318,7 @@ class SessionsStore {
 
   private get apiParams() {
     const f = this.filters;
+    const timeRange = resolveTimeRange(f);
     // Don't exclude "unknown" when explicitly viewing it.
     const exclude =
       f.hideUnknownProject && f.project !== "unknown"
@@ -230,9 +330,9 @@ class SessionsStore {
       machine: f.machine || undefined,
       agent: f.agent || undefined,
       termination: f.termination || undefined,
-      date: f.date || undefined,
-      date_from: f.dateFrom || undefined,
-      date_to: f.dateTo || undefined,
+      date: timeRange.date,
+      date_from: timeRange.dateFrom,
+      date_to: timeRange.dateTo,
       active_since: f.recentlyActive
         ? new Date(
             Date.now() - 24 * 60 * 60 * 1000,
@@ -678,6 +778,15 @@ class SessionsStore {
     this.load();
   }
 
+  setTimeRangeFilter(range: Exclude<SessionTimeRange, "custom">) {
+    this.filters.timeRange = range;
+    this.filters.date = "";
+    this.filters.dateFrom = "";
+    this.filters.dateTo = "";
+    this.setActiveSession(null);
+    this.load();
+  }
+
   setMinUserMessagesFilter(n: number) {
     this.filters.minUserMessages = n;
     this.setActiveSession(null);
@@ -741,11 +850,10 @@ class SessionsStore {
       f.machine ||
       f.agent ||
       f.termination ||
+      hasExplicitDateFilters(f) ||
+      f.timeRange !== DEFAULT_SESSION_TIME_RANGE ||
       f.recentlyActive ||
       f.hideUnknownProject ||
-      f.dateFrom ||
-      f.dateTo ||
-      f.date ||
       f.minUserMessages > 0 ||
       !f.includeOneShot ||
       f.includeAutomated
